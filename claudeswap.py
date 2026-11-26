@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# claudeswap — claude … claude10 profillerinin hesaplarını yer değiştirir.
+# claudeswap — claude, claude2, claude3 … profillerinin hesaplarını yer değiştirir.
 # Yalnızca hesap girişi ve hesap bilgisi taşınır; ayarlar, plugin'ler, hafıza,
 # geçmiş ve projeler kendi klasöründe kalır.
 import glob
@@ -94,6 +94,26 @@ def _home_uses_config_dir(cfg_dir, home_json, env=None):
         return True
 
 
+PROFILE_DIR = re.compile(r"\.claude(\d+)$")
+PROFILE_CMD = re.compile(r"claude(\d+)(\.cmd)?$", re.I)
+BASE_PROFILES = 10                   # claude … claude10 her zaman tanınır; fazlası diskte varsa
+
+
+def profile_numbers():
+    """Diskte olan profil numaraları (≥2): ~/.claudeN klasörleri ve ~/.local/bin/claudeN komutları."""
+    nums = set()
+    for folder, rx in ((HOME, PROFILE_DIR), (os.path.join(HOME, ".local", "bin"), PROFILE_CMD)):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for n in names:
+            m = rx.fullmatch(n)
+            if m and int(m.group(1)) >= 2:
+                nums.add(int(m.group(1)))
+    return nums
+
+
 def _make_slots():
     home_dir, home_json = os.path.join(HOME, ".claude"), os.path.join(HOME, ".claude.json")
     if _home_uses_config_dir(home_dir, home_json):
@@ -102,7 +122,7 @@ def _make_slots():
     else:
         first = _slot("claude", home_dir, home_json, keychain_service(None))
     rest = []
-    for i in range(2, 11):
+    for i in range(2, max([BASE_PROFILES] + sorted(profile_numbers())) + 1):
         d = os.path.join(HOME, f".claude{i}")
         rest.append(_slot(f"claude{i}", d, os.path.join(d, ".claude.json"), keychain_service(d), config_env=True))
     return [first] + rest
@@ -128,13 +148,14 @@ API = "https://api.anthropic.com/api/oauth/"
 MISSING = object()
 
 HELP = """\
-clsw — Claude Code profilleri (claude, claude2 … claude10) arasında hesap değiştirir.
+clsw — Claude Code profilleri (claude, claude2, claude3 …) arasında hesap değiştirir.
 
 Kullanım:
   clsw <hesap>              E-posta ya da kullanıcı adıyla hesabı claude'a getir
   clsw claude3              claude ile claude3'ün hesaplarını değiştir
   clsw claude2 claude4      İki profilin hesaplarını değiştir
   clsw empty                İlk giriş yapılmamış profili claude ile değiştir
+  clsw generate 3           3 yeni profil aç (sıradaki numaralarla: claude7, claude8 …)
   clsw list                 Hesaplar, limitler, reset hakları
   clsw process              Açık Claude oturumları; eş: ps, oturum
   clsw cost                 İstem / iş başına maliyet (son 24 saat); eş: maliyet
@@ -2067,12 +2088,13 @@ def activate(slots):
 
 # ---------------------------------------------------------------- komutlar
 
-LIST_SLOTS = 6   # clsw list claude … claude6'yı gösterir; claude7–10 yalnız girişliyse (hesap gözden kaybolmasın)
+LIST_SLOTS = 6   # clsw list claude … claude6'yı gösterir; sonrakiler girişliyse ya da clsw generate ile açıldıysa
 
 
 def cmd_list():
     infos = [slot_info(s) for s in SLOTS[:LIST_SLOTS]]
-    infos += [i for i in map(slot_info, SLOTS[LIST_SLOTS:]) if i["oauth"].get("accessToken") or i["email"]]
+    infos += [i for i in map(slot_info, SLOTS[LIST_SLOTS:]) if i["oauth"].get("accessToken") or i["email"]
+              or os.path.exists(os.path.join(i["slot"]["dir"], GENERATED_MARK))]
     with ThreadPoolExecutor(len(infos)) as ex:   # süresi geçmiş access token önce yenilenir (refresh_if_stale)
         infos = list(ex.map(lambda i: fetch_live(refresh_if_stale(i)), infos))
     remember_accounts({i["token_uuid"]: i["token_email"] for i in infos if i.get("token_uuid") and i.get("token_email")})
@@ -2642,11 +2664,14 @@ def dispatch(argv):
     args = argv[1:]
     cmd = args[0] if args else "help"
     by_name = {s["name"]: s for s in SLOTS}
+    if cmd.lower() in GENERATE_CMDS:
+        cmd_generate(args[1:])
+        return []
     if len(args) > 2:
         die("En fazla iki profil belirt. Kullanım: claudeswap help", 2)
     if len(args) == 2:
         if any(n not in by_name for n in args):
-            die("İki profil için claude, claude2, …, claude10 kullan.", 2)
+            die("İki profil için claude, claude2, claude3 … kullan (yenisi için: clsw generate <sayı>).", 2)
         return cmd_swap(by_name[args[0]], by_name[args[1]])
     if cmd in ("help", "-h", "--help", "yardım", "yardim"):
         print(render_help(HELP), end="")
@@ -2664,6 +2689,54 @@ def dispatch(argv):
     else:
         return cmd_use(cmd)
     return []
+
+
+GENERATE_CMDS = ("generate", "gen", "olustur", "oluştur", "yeni")
+GENERATED_MARK = ".clsw-profile"     # clsw generate ile açılan profil (clsw list girişsiz de gösterir)
+
+
+def launcher_text(n):
+    """claudeN komutunun içeriği: Claude Code'u o profilin klasörüyle açar."""
+    if os.name == "nt":
+        return (f"@echo off\r\nrem clsw generate: claude{n} profili\r\nsetlocal\r\n"
+                f'set "CLAUDE_CONFIG_DIR=%USERPROFILE%\\.claude{n}"\r\nclaude %*\r\n')
+    return (f"#!/bin/sh\n# clsw generate: claude{n} profili\n"
+            f'CLAUDE_CONFIG_DIR="$HOME/.claude{n}" exec claude "$@"\n')
+
+
+def cmd_generate(args):
+    """clsw generate N: mevcut en büyük numaradan sonra N yeni profil (klasör + claudeN komutu)."""
+    if len(args) != 1 or not args[0].isdigit() or not 1 <= int(args[0]) <= 20:
+        die("Kullanım: clsw generate <sayı>  (1–20; örn. clsw generate 3)", 2)
+    count = int(args[0])
+    start = max([1] + sorted(profile_numbers())) + 1
+    bdir = os.path.join(HOME, ".local", "bin")
+    os.makedirs(bdir, exist_ok=True)
+    made = []
+    for n in range(start, start + count):
+        d = os.path.join(HOME, f".claude{n}")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        with open(os.path.join(d, GENERATED_MARK), "w") as f:
+            f.write("clsw generate\n")
+        cmd = os.path.join(bdir, f"claude{n}" + (".cmd" if os.name == "nt" else ""))
+        if not os.path.exists(cmd):
+            with open(cmd, "w", newline="") as f:
+                f.write(launcher_text(n))
+            if os.name != "nt":
+                os.chmod(cmd, 0o755)
+        made.append(n)
+    names = ", ".join(f"claude{n}" for n in made)
+    print(green(f"✓ {len(made)} yeni profil açıldı: {names}"))
+    for n in made:
+        print(f"  {bold(f'claude{n}')}  {dim(tilde(os.path.join(HOME, f'.claude{n}')))}")
+    print(f"\nGiriş için: {bold(f'claude{made[0]}')} yaz, açılınca {bold('/login')} ile hesabına gir.")
+    print(dim("Sonra hesapları görmek için: clsw list · birini claude'a getirmek için: clsw claude" + str(made[0])))
+    paths = [os.path.normcase(os.path.realpath(x)) for x in os.environ.get("PATH", "").split(os.pathsep) if x]
+    if os.path.normcase(os.path.realpath(bdir)) not in paths:
+        print(yellow(f"{tilde(bdir)} PATH'te değil; claudeN komutları için PATH'e ekle."))
+    elif os.name != "nt":
+        print(dim("Komut bulunamazsa yeni terminal aç (ya da: hash -r)."))
+    return made
 
 
 def take_lock(f):

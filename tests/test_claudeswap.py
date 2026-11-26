@@ -923,5 +923,60 @@ class ListCellTests(unittest.TestCase):
         self.assertIn('- yeni sütun', out.getvalue())
 
 
+class GenerateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.g = load(self.root)
+        self.g['USE_COLOR'] = False
+
+    def gen(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            made = self.g['cmd_generate'](list(args))
+        return made, out.getvalue()
+
+    def test_generate_continues_after_highest_profile(self):
+        import os
+        for n in (2, 3, 6):
+            (self.root / f'.claude{n}').mkdir()
+        made, out = self.gen('3')
+        self.assertEqual(made, [7, 8, 9])
+        self.assertIn('claude7, claude8, claude9', out)
+        for n in made:
+            d = self.root / f'.claude{n}'
+            self.assertTrue((d / '.clsw-profile').exists())
+            name = f'claude{n}' + ('.cmd' if os.name == 'nt' else '')
+            text = (self.root / '.local' / 'bin' / name).read_text()
+            self.assertIn(f'.claude{n}', text)
+            self.assertIn('claude', text)
+            if os.name != 'nt':
+                self.assertTrue(os.access(self.root / '.local' / 'bin' / name, os.X_OK))
+        self.assertEqual(self.gen('1')[0], [10])                            # bir sonraki çağrı kaldığı yerden
+
+    def test_existing_commands_count_and_slots_grow(self):
+        import os
+        b = self.root / '.local' / 'bin'
+        b.mkdir(parents=True)
+        (b / 'claude12.cmd').write_text('x')                                  # başka yoldan açılmış profil
+        self.assertEqual(self.gen('2')[0], [13, 14])
+        names = [s['name'] for s in self.g['_make_slots']()]
+        self.assertEqual(names[0], 'claude')
+        self.assertIn('claude14', names)
+        self.assertEqual(len(names), 14)
+
+    def test_generate_rejects_bad_input(self):
+        for bad in ([], ['0'], ['21'], ['üç'], ['2', '3']):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.gen(*bad)
+
+    def test_dispatch_generate_and_help(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.g['dispatch'](['clsw', 'generate', '2']), [])
+        self.assertTrue((self.root / '.claude2').exists() and (self.root / '.claude3').exists())
+        self.assertIn('clsw generate 3', self.g['HELP'])
+
+
 if __name__ == '__main__':
     unittest.main()
