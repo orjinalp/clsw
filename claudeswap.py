@@ -159,7 +159,8 @@ Kullanım:
   clsw list                 Hesaplar, limitler, reset hakları
   clsw process              Açık Claude oturumları; eş: ps, oturum
   clsw cost                 İstem / iş başına maliyet (son 24 saat); eş: maliyet
-  clsw web                  Maliyet web arayüzü (http://127.0.0.1:8790)
+  clsw web on | off         Maliyet web arayüzü (http://127.0.0.1:8790); ayar yeniden açılışta da geçerli
+  clsw web                  Web arayüzünün durumu (ön planda çalıştırmak: clsw web run)
   clsw update               Son sürümü kur; eş: güncelle (--check: yalnız bak)
   clsw version              Kurulu sürüm; eş: sürüm, --version
   clsw help                 Bu yardım (tek başına clsw de gösterir)
@@ -189,6 +190,11 @@ Maliyet (clsw cost):
   clsw cost oturum                      oturum başına tek satır
   clsw cost terminal | p | kanal        yalnız o kaynak
   Tutar, abonelik kullanımının API fiyatıyla karşılığıdır; ⇄ satırı clsw ile yapılan hesap değişimidir.
+
+Web arayüzü (clsw web):
+  Varsayılan kapalı. clsw web on arka planda başlatır ve oturum açılışına ekler (Windows: kullanıcı
+  başlangıcı, macOS: LaunchAgent, Linux: systemd --user); clsw web off durdurur ve kaldırır.
+  Kayıt: ~/.claudeswap/web.log. on anındaki CLSW_WEB_HOST/PORT/ALLOW/NAMES saklanır; düz on yerele döner.
 
 Güncelleme:
   Terminalde açılınca yeni sürüm varsa notlarını gösterip sorar; npm ya da Homebrew ile
@@ -2420,6 +2426,47 @@ def on_path(folder):
     return os.path.normcase(real) in path_dirs()
 
 
+def add_user_path(folder):
+    """Windows: klasörü kullanıcı ortam değişkeni Path'e kalıcı ekler. "added", "present" ya da hata metni."""
+    import winreg
+    norm = lambda p: os.path.normcase(os.path.expandvars(p).rstrip("\/"))
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+            try:
+                cur, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                cur, kind = "", winreg.REG_EXPAND_SZ
+            parts = [x for x in str(cur).split(";") if x]
+            if norm(folder) in {norm(x) for x in parts}:
+                return "present"
+            winreg.SetValueEx(key, "Path", 0, kind if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ)
+                              else winreg.REG_EXPAND_SZ, ";".join(parts + [folder]))
+    except OSError as e:
+        return str(e)
+    try:                                  # açık Gezgin vb. yeni değeri görsün (WM_SETTINGCHANGE)
+        import ctypes
+        res = ctypes.c_ulong()
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 2, 3000, ctypes.byref(res))
+    except (OSError, AttributeError):
+        pass
+    return "added"
+
+
+def path_notice(folder, what):
+    """PATH'te olmayan klasör: Windows'ta kalıcı ekler ve terminali yeniden başlatmayı söyler; diğerlerinde uyarır."""
+    if os.name == "nt":
+        r = add_user_path(folder)
+        if r in ("added", "present"):
+            print(yellow(f"{tilde(folder)} " + ("PATH'e eklendi (kullanıcı ortam değişkenleri)." if r == "added"
+                                               else "PATH'te kayıtlı ama bu terminal eski PATH'i görüyor.")))
+            print(yellow(f"Terminali yeniden başlatman gerekiyor; sonra {what} her yerden çalışır."))
+            return
+        print(yellow(f"{tilde(folder)} PATH'e eklenemedi ({r}); elle ekle ki {what} her yerden çalışsın."))
+        return
+    print(yellow(f"{tilde(folder)} PATH'te değil; ekle ki {what} her yerden çalışsın."))
+
+
 def bin_dir():
     return os.path.join(HOME, ".local", "bin")
 
@@ -2588,6 +2635,9 @@ def do_install(rel):
     except (OSError, RuntimeError, urllib.error.URLError) as e:
         die(f"Güncelleme kurulamadı: {e}")
     print(green(f"{fmt_version(rel['version'])} kuruldu.") + dim(f"  {tilde(target)}"))
+    if web_state().get("on"):
+        web_stop()
+        web_spawn()
     return target
 
 
@@ -2598,6 +2648,7 @@ def managed_update(via, argv):
     if via == "npm":
         if os.environ.get("CLSW_LAUNCHER_UPDATE") == "1":
             sys.stdout.flush()
+            web_stop()                       # Windows'ta çalışan clsw web dosyayı kilitler; sonraki komut yeniden açar
             only = argv is None and os.environ.get("CLSW_LAUNCHER") == "2"
             sys.exit(LAUNCHER_UPDATE_ONLY_EXIT if only else LAUNCHER_UPDATE_EXIT)
         die(f"Bu kurulum kendi kendine güncellenemiyor; çalıştır: {MANAGED_UPDATE['npm']}")
@@ -2608,9 +2659,7 @@ def managed_update(via, argv):
     # Onay clsw'de alındı; Homebrew 7+ terminalde ikinci kez sormasın (eski sürümler bu değişkeni yok sayar).
     if subprocess.call([brew, "upgrade", "clsw"], env=dict(os.environ, HOMEBREW_NO_ASK="1")):
         die("brew upgrade clsw başarısız oldu.")
-    exe = os.path.realpath(sys.executable).replace("\\", "/")
-    cut = exe.lower().find("/cellar/")
-    target = os.path.join(exe[:cut], "bin", "clsw") if cut > 0 else shutil.which("clsw")
+    target = brew_bin()
     if argv is None:
         print(green("Güncellendi; yeni sürüm bir sonraki komutta çalışır."))
         return
@@ -2711,7 +2760,7 @@ def cmd_install():
     cleanup_versions()
     print(green(f"clsw v{__version__} kuruldu: {tilde(exe)}") + dim("  (eş: claudeswap)"))
     if not on_path(where) and not os.environ.get("CLSW_QUIET_PATH"):
-        print(yellow(f"{tilde(where)} PATH'te değil; ekle ki her yerden clsw yazılabilsin."))
+        path_notice(where, "clsw")
 
 
 def cmd_update(args):
@@ -2806,7 +2855,7 @@ def cmd_generate(args):
     print(f"\nGiriş için: {bold(f'claude{made[0]}')} yaz, açılınca {bold('/login')} ile hesabına gir.")
     print(dim("Sonra hesapları görmek için: clsw list · birini claude'a getirmek için: clsw claude" + str(made[0])))
     if not on_path(bdir):
-        print(yellow(f"{tilde(bdir)} PATH'te değil; claudeN komutları için PATH'e ekle."))
+        path_notice(bdir, "claudeN komutları")
     elif os.name != "nt":
         print(dim("Komut bulunamazsa yeni terminal aç (ya da: hash -r)."))
     return made
@@ -2820,11 +2869,307 @@ def take_lock(f):
         msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
 
 
-def cmd_web():
+def web_file(name):
+    return os.path.join(STATE_ROOT, name)          # STATE_ROOT testlerde değişir; yol her seferinde hesaplanır
+
+
+WEB_ENV = ("CLSW_WEB_HOST", "CLSW_WEB_PORT", "CLSW_WEB_ALLOW", "CLSW_WEB_NAMES")
+WEB_LABEL = "com.orjinalp.clsw.web"
+WEB_ON = ("on", "aç", "ac", "start")
+WEB_OFF = ("off", "kapat", "stop")
+WEB_USAGE = "Kullanım: clsw web [on|off|status|run]"
+
+
+def web_state():
+    return parse_json(read_bytes(web_file("web.json"))) or {}
+
+
+def save_web_state(st):
+    os.makedirs(STATE_ROOT, mode=0o700, exist_ok=True)
+    atomic_write(web_file("web.json"), json.dumps(st).encode(), private=True)
+
+
+def brew_bin():
+    exe = os.path.realpath(sys.executable).replace("\\", "/")
+    cut = exe.lower().find("/cellar/")
+    return os.path.join(exe[:cut], "bin", "clsw") if cut > 0 else shutil.which("clsw")
+
+
+def web_command():
+    """Güncellemeden sonra da aynı kalan çalıştırma yolu (açılışta başlatma bunu çağırır)."""
+    if not FROZEN:
+        return [sys.executable, os.path.realpath(__file__)]
+    via = install_method()
+    if via == "brew":
+        return [brew_bin() or os.path.realpath(sys.executable)]
+    cur = os.path.join(app_root(), "current", exe_name())
+    if via is None and os.path.exists(cur):
+        return [cur]
+    return [os.path.realpath(sys.executable)]
+
+
+def web_url(env):
+    host = env.get("CLSW_WEB_HOST") or "127.0.0.1"
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    return f"http://{shown}:{env.get('CLSW_WEB_PORT') or 8790}"
+
+
+def web_pid_is_ours(pid):
+    """Kayıtlı pid hâlâ clsw web mi (pid başka bir sürece geçmiş olabilir)."""
+    if not pid or pid == os.getpid() or not pid_alive(pid):
+        return False
+    if os.name != "nt":
+        r = _run(["ps", "-o", "command=", "-p", str(pid)])
+        return " web" in r and ("clsw" in r or "claudeswap" in r)
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return False
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(len(buf))
+        if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return False
+        name = os.path.basename(buf.value).lower()
+        return name.startswith(("clsw", "claudeswap", "python"))
+    finally:
+        k32.CloseHandle(h)
+
+
+def web_kill(pid):
+    if os.name != "nt":
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+    else:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x0001, False, pid)        # PROCESS_TERMINATE
+        if not h:
+            return
+        k32.TerminateProcess(h, 0)
+        k32.CloseHandle(h)
+    deadline = time.monotonic() + 5
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
+def web_stop():
+    st = web_state()
+    pid = st.get("pid")
+    if web_pid_is_ours(pid):
+        web_kill(pid)
+    if "pid" in st:
+        st.pop("pid", None)
+        st.pop("version", None)
+        save_web_state(st)
+    return bool(pid)
+
+
+def web_spawn():
+    """clsw web run'ı arka planda, terminalden bağımsız başlatır; kendi pid'ini web.json'a o yazar."""
+    st = web_state()
+    os.makedirs(STATE_ROOT, mode=0o700, exist_ok=True)
+    env = dict(os.environ, CLSW_NO_UPDATE="1")
+    for k in WEB_ENV:
+        env.pop(k, None)
+    env.update(st.get("env") or {})
+    kw = dict(stdin=subprocess.DEVNULL, cwd=HOME, env=env, close_fds=True)
+    with open(web_file("web.log"), "ab") as log:
+        kw.update(stdout=log, stderr=log)
+        if os.name == "nt":
+            flags = 0x00000008 | 0x00000200            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            try:
+                subprocess.Popen(web_command() + ["web", "run"], creationflags=flags | 0x01000000, **kw)
+            except OSError:                             # iş nesnesi ayrılmaya izin vermiyorsa
+                subprocess.Popen(web_command() + ["web", "run"], creationflags=flags, **kw)
+        else:
+            subprocess.Popen(web_command() + ["web", "run"], start_new_session=True, **kw)
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if web_pid_is_ours(web_state().get("pid")):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _systemd_user():
+    return bool(shutil.which("systemctl")) and \
+        subprocess.run(["systemctl", "--user", "show-environment"], capture_output=True).returncode == 0
+
+
+def _quote_args(args):
+    return " ".join('"' + a.replace('"', '\\"') + '"' if (" " in a or not a) else a for a in args)
+
+
+def autostart_paths():
+    return {"mac": os.path.join(HOME, "Library", "LaunchAgents", WEB_LABEL + ".plist"),
+            "systemd": os.path.join(HOME, ".config", "systemd", "user", "clsw-web.service"),
+            "desktop": os.path.join(HOME, ".config", "autostart", "clsw-web.desktop")}
+
+
+def autostart_set(on):
+    """Oturum açılınca clsw web run --auto. Windows: HKCU Run · macOS: LaunchAgent · Linux: systemd --user,
+    yoksa XDG autostart. Hata olursa açıklamasını döner."""
+    args = web_command() + ["web", "run", "--auto"]
+    p = autostart_paths()
+    try:
+        if os.name == "nt":
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_SET_VALUE)
+            with key:
+                if on:
+                    # headless conhost: oturum açılışında konsol penceresi görünmesin
+                    conhost = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "conhost.exe")
+                    winreg.SetValueEx(key, "clsw web", 0, winreg.REG_SZ,
+                                      subprocess.list2cmdline([conhost, "--headless"] + args))
+                else:
+                    try:
+                        winreg.DeleteValue(key, "clsw web")
+                    except FileNotFoundError:
+                        pass
+        elif sys.platform == "darwin":
+            if on:
+                import plistlib
+                os.makedirs(os.path.dirname(p["mac"]), exist_ok=True)
+                with open(p["mac"], "wb") as f:
+                    plistlib.dump({"Label": WEB_LABEL, "ProgramArguments": args, "RunAtLoad": True,
+                                   "StandardOutPath": web_file("web.log"), "StandardErrorPath": web_file("web.log")}, f)
+            else:
+                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{WEB_LABEL}"], capture_output=True)
+                if os.path.exists(p["mac"]):
+                    os.remove(p["mac"])
+        else:
+            if on and _systemd_user():
+                os.makedirs(os.path.dirname(p["systemd"]), exist_ok=True)
+                with open(p["systemd"], "w") as f:
+                    f.write(f"[Unit]\nDescription=clsw web\n\n[Service]\nExecStart={_quote_args(args)}\n\n"
+                            "[Install]\nWantedBy=default.target\n")
+                subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+                r = subprocess.run(["systemctl", "--user", "enable", "clsw-web.service"], capture_output=True, text=True)
+                if r.returncode:
+                    return r.stderr.strip() or "systemctl --user enable başarısız"
+            elif on:
+                os.makedirs(os.path.dirname(p["desktop"]), exist_ok=True)
+                with open(p["desktop"], "w") as f:
+                    f.write(f"[Desktop Entry]\nType=Application\nName=clsw web\nExec={_quote_args(args)}\n"
+                            "NoDisplay=true\nX-GNOME-Autostart-enabled=true\n")
+            else:
+                if os.path.exists(p["systemd"]):
+                    subprocess.run(["systemctl", "--user", "disable", "clsw-web.service"], capture_output=True)
+                    os.remove(p["systemd"])
+                    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+                if os.path.exists(p["desktop"]):
+                    os.remove(p["desktop"])
+    except OSError as e:
+        return str(e)
+    return None
+
+
+def web_ensure():
+    """Açık ayarlıysa ve çalışmıyorsa (ya da eski sürüm çalışıyorsa) arka planda başlatır; her komutta çağrılır."""
+    st = web_state()
+    if not st.get("on"):
+        return
+    running = web_pid_is_ours(st.get("pid"))
+    if running and (parse_version(st.get("version")) or (0,)) >= parse_version(__version__):
+        return
+    try:
+        if running:
+            web_stop()
+        web_spawn()
+    except OSError:
+        pass
+
+
+def cmd_web_on():
+    env = {k: os.environ[k] for k in WEB_ENV if os.environ.get(k)}
+    st = web_state()
+    changed = st.get("env", {}) != env
+    st.update(on=True, env=env)
+    save_web_state(st)
+    err = autostart_set(True)
+    if changed:
+        web_stop()
+    running = web_pid_is_ours(web_state().get("pid")) or web_spawn()
+    if running:
+        print(green(f"✓ clsw web açık: {web_url(env)}"))
+    else:
+        print(red(f"clsw web başlatılamadı; kayıt: {tilde(web_file('web.log'))}"))
+    if err:
+        print(yellow(f"Açılışta otomatik başlatma kurulamadı ({err}); her clsw komutunda yine başlatılır."))
+    else:
+        print(dim("Bilgisayar yeniden açılınca da başlar. Kapatmak: clsw web off"))
+    if env.get("CLSW_WEB_HOST", "127.0.0.1") not in ("127.0.0.1", "localhost", "::1"):
+        print(yellow("UYARI: bu makinenin dışına açık; şifresiz ve girişsiz. Yalnız güvenilir VPN içinde kullan."))
+
+
+def cmd_web_off():
+    st = web_state()
+    st["on"] = False
+    save_web_state(st)
+    err = autostart_set(False)
+    web_stop()
+    print(green("✓ clsw web kapalı.") + dim("  Bilgisayar yeniden açılınca da kapalı kalır. Açmak: clsw web on"))
+    if err:
+        print(yellow(f"Otomatik başlatma kaydı silinemedi: {err}"))
+
+
+def cmd_web_status():
+    st = web_state()
+    pid = st.get("pid")
+    if web_pid_is_ours(pid):
+        print(green(f"clsw web çalışıyor: {web_url(st.get('env') or {})}") + dim(f"  (pid {pid})"))
+    else:
+        print("clsw web çalışmıyor.")
+    print(dim("Ayar: " + ("açık (açılışta başlar) · kapatmak: clsw web off" if st.get("on")
+                          else "kapalı · açmak: clsw web on")))
+
+
+def cmd_web_run(auto=False):
+    """Ön planda çalışır. --auto: açılışta başlatma; ayar kapalıysa ya da zaten çalışıyorsa çıkar."""
+    st = web_state()
+    if auto and not st.get("on"):
+        return
+    if web_pid_is_ours(st.get("pid")):
+        if auto:
+            return
+        die(f"clsw web zaten arka planda çalışıyor: {web_url(st.get('env') or {})} (durdurmak: clsw web off)")
+    if auto:
+        for k, v in (st.get("env") or {}).items():
+            os.environ.setdefault(k, v)
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     import cost_web
     cost_web.attach(globals())
-    cost_web.main()
+    me = os.getpid()
+    st = web_state()
+    st.update(pid=me, version=__version__)
+    save_web_state(st)
+    try:
+        cost_web.main()
+    finally:
+        st = web_state()
+        if st.get("pid") == me:
+            st.pop("pid", None)
+            st.pop("version", None)
+            save_web_state(st)
+
+
+def cmd_web(args):
+    sub = args[0].lower() if args else "status"
+    if sub in WEB_ON:
+        return cmd_web_on()
+    if sub in WEB_OFF:
+        return cmd_web_off()
+    if sub in ("status", "durum"):
+        return cmd_web_status()
+    if sub == "run":
+        return cmd_web_run(auto="--auto" in args)
+    die(WEB_USAGE, 2)
 
 
 def main(argv):
@@ -2836,7 +3181,8 @@ def main(argv):
     if cmd in UPDATE_CMDS:
         return cmd_update(argv[2:])
     if cmd == "web":
-        return cmd_web()
+        return cmd_web(argv[2:])
+    web_ensure()
     if cmd == "install":
         return cmd_install()
     update = start_update_check()             # GitHub sorgusu komutla aynı anda; soru komuttan sonra

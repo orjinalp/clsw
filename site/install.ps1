@@ -39,7 +39,8 @@ try {
     $parts = @($userPath -split ';' | Where-Object { $_ })
     if ($parts -notcontains $bin) {
         [Environment]::SetEnvironmentVariable("Path", (($parts + $bin) -join ';'), "User")
-        Write-Host "PATH'e $bin eklendi. Yeni bir terminal ac."
+        Write-Host "PATH'e $bin eklendi (kullanici ortam degiskenleri)."
+        Write-Host "Terminali yeniden baslatman gerekiyor; sonra her yerden clsw yazilabilir."
     }
     if (($env:Path -split ';') -notcontains $bin) { $env:Path = "$env:Path;$bin" }
     Write-Host "Hazir. Baslamak icin: clsw list"
