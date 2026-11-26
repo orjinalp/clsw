@@ -978,5 +978,68 @@ class GenerateTests(unittest.TestCase):
         self.assertIn('clsw generate 3', self.g['HELP'])
 
 
+class UsageCacheTests(unittest.TestCase):
+    def setUp(self):
+        import time
+        self.time = time
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.g = load(self.root)
+        self.calls, self.measured = [], []
+        self.g['measure_usage'] = lambda slot, tok: self.measured.append(1) or {'five_hour': {'utilization': 9}}
+        self.info = {'slot': self.g['SLOTS'][0], 'exists': True, 'email': 'a@example.test',
+                     'oauth': {'accessToken': 't', 'accountUuid': 'U1', 'expiresAt': 9e12}}
+
+    def put(self, age, src='api'):
+        import json as j
+        d = self.root / '.claudeswap'
+        d.mkdir(exist_ok=True)
+        (d / 'usage-cache.json').write_text(j.dumps({'U1': {'ts': self.time.time() - age, 'src': src,
+                                                            'usage': {'five_hour': {'utilization': 1}}}}))
+
+    def api(self, status_usage=None):
+        import urllib.error
+
+        def fake(token, path):
+            self.calls.append(path)
+            if path == 'profile':
+                return {'account': {'email': 'a@example.test', 'uuid': 'U1'}}
+            if status_usage:
+                raise urllib.error.HTTPError('u', status_usage, 'x', {}, None)
+            return {'five_hour': {'utilization': 5}}
+        self.g['api_get'] = fake
+
+    def test_fresh_result_skips_usage_api(self):
+        self.put(10)
+        self.api()
+        info = self.g['fetch_live'](dict(self.info))
+        self.assertEqual(info['usage']['five_hour']['utilization'], 1)
+        self.assertEqual(self.calls, ['profile'])
+
+    def test_rate_limited_uses_recent_cache_without_measuring(self):
+        self.put(20 * 60)
+        self.api(status_usage=429)
+        info = self.g['fetch_live'](dict(self.info))
+        self.assertEqual(info['usage']['five_hour']['utilization'], 1)
+        self.assertEqual(self.measured, [])                                  # yavaş claude -p yok
+
+    def test_cache_works_without_account_uuid_in_login(self):
+        import json as j
+        info = dict(self.info, oauth={'accessToken': 't', 'expiresAt': 9e12}, account_uuid='U9')
+        self.api(status_usage=429)
+        self.g['fetch_live'](dict(info))
+        self.g['fetch_live'](dict(info))
+        self.assertEqual(self.measured, [1])                                  # ikinci çağrı önbellekten
+        cache = j.loads((self.root / '.claudeswap' / 'usage-cache.json').read_text())
+        self.assertIn('U9', cache)
+
+    def test_rate_limited_without_cache_measures_once(self):
+        self.api(status_usage=429)
+        info = self.g['fetch_live'](dict(self.info))
+        self.assertEqual(self.measured, [1])
+        self.assertEqual(info['usage']['five_hour']['utilization'], 9)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -215,6 +215,20 @@ class UpdateTests(unittest.TestCase):
         left = sorted(os.listdir(Path(g['app_root']()) / 'versions'))
         self.assertEqual(left, ['1.2.0', '1.3.0'])                              # en yeni iki sürüm kalır
 
+    def test_path_check_survives_unreadable_entries(self):
+        g = self.layout_g()
+        real = os.path.realpath
+
+        def picky(p, *a, **k):
+            if 'bozuk' in str(p):
+                raise OSError(448, 'güvenilmeyen bağlama noktası')
+            return real(p, *a, **k)
+        good = str(self.root / 'iyi')
+        with mock.patch('os.path.realpath', picky), \
+                mock.patch.dict(os.environ, {'PATH': os.pathsep.join([str(self.root / 'bozuk'), good])}):
+            self.assertTrue(g['on_path'](good))
+            self.assertFalse(g['on_path'](str(self.root / 'yok')))
+
     def test_archive_with_escaping_path_is_rejected(self):
         import tarfile
         g = self.layout_g()

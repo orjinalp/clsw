@@ -455,12 +455,19 @@ def account_email(global_json):
 
 def slot_info(s):
     creds = parse_json(read_creds(s)) or {}
+    acct = (parse_json(read_bytes(s["json"])) or {}).get("oauthAccount") or {}
     return {
         "slot": s,
         "exists": os.path.isdir(s["dir"]),
         "oauth": creds.get("claudeAiOauth") or {},
-        "email": account_email(parse_json(read_bytes(s["json"]))),
+        "email": acct.get("emailAddress") if isinstance(acct, dict) else None,
+        "account_uuid": acct.get("accountUuid") if isinstance(acct, dict) else None,
     }
+
+
+def usage_key(info):
+    """Kullanım önbelleğinin anahtarı. macOS Anahtar Zinciri kaydında accountUuid yok: .claude.json'dakini kullan."""
+    return info["oauth"].get("accountUuid") or info.get("account_uuid") or info.get("email")
 
 
 def cli_user_agent():
@@ -493,12 +500,14 @@ def api_get(token, path):
 # token'ıyla küçük bir haiku isteği — Claude Code stream-json çıktısında
 # `rate_limit_event.rate_limit_info.unifiedWindows` (pencere başına kullanım oranı + sıfırlanma) verir.
 # ~2–3 sn, ~$0.001; oturum kaydı yazılmaz. Sonuç ~/.claudeswap/usage-cache.json'da tutulur.
-USAGE_CACHE_TTL = 300                # yedek ölçüm bu kadar saniye içinde tekrarlanmaz
+USAGE_FRESH = 60                     # sn; bu kadar taze API sonucu varsa usage API'ye hiç sorulmaz (429'u önler)
+USAGE_CACHE_TTL = 1800               # sn; 429'da bu kadar eski önbellek gösterilir, yavaş claude -p ölçümü yapılmaz
 _usage_lock = threading.Lock()
 
 
-def usage_cache_put(o, usage, src):
-    key = o.get("accountUuid")
+def usage_cache_put(key, usage, src):
+    if isinstance(key, dict):                  # eski çağrı biçimi: oauth sözlüğü
+        key = key.get("accountUuid")
     if not key or not isinstance(usage, dict):
         return
     with _usage_lock:
@@ -549,14 +558,15 @@ def measure_usage(slot, token):
 
 
 def usage_fallback(info):
-    """429 sonrası: 5 dk'dan taze önbellek ya da yeni ölçüm. Bulunursa info["usage"] dolar, True döner."""
+    """429 sonrası: 30 dk'dan taze önbellek ya da (yoksa) yeni ölçüm. Bulunursa info["usage"] dolar, True döner."""
     o = info["oauth"]
-    hit = (read_json(_state("usage-cache.json")) or {}).get(o.get("accountUuid") or "-")
+    key = usage_key(info) or "-"
+    hit = (read_json(_state("usage-cache.json")) or {}).get(key)
     if not hit or time.time() - hit.get("ts", 0) >= USAGE_CACHE_TTL:
         u = measure_usage(info["slot"], o["accessToken"])
         if u is not None:
-            usage_cache_put(o, u, "olcum")
-            hit = (read_json(_state("usage-cache.json")) or {}).get(o.get("accountUuid") or "-") \
+            usage_cache_put(key, u, "olcum")
+            hit = (read_json(_state("usage-cache.json")) or {}).get(key) \
                 or {"ts": time.time(), "usage": u, "src": "olcum"}
     if not hit or not isinstance(hit.get("usage"), dict):
         return False
@@ -670,15 +680,21 @@ def fetch_live(info):
     else:
         try:
             # İki istek aynı anda: her biri ~1 sn (çoğu TLS el sıkışması); arka arkaya hesap başına 2 sn ederdi.
+            cached = (read_json(_state("usage-cache.json")) or {}).get(usage_key(info) or "-") or {}
+            fresh = (cached.get("src") == "api" and isinstance(cached.get("usage"), dict)
+                     and time.time() - cached.get("ts", 0) < USAGE_FRESH)
             with ThreadPoolExecutor(2) as ex:
                 f_prof = ex.submit(api_get, o["accessToken"], "profile")
-                f_usage = ex.submit(api_get, o["accessToken"], USAGE_PATH)
+                f_usage = None if fresh else ex.submit(api_get, o["accessToken"], USAGE_PATH)
                 prof = f_prof.result()
                 info["token_email"] = (prof.get("account") or {}).get("email")
                 info["token_uuid"] = (prof.get("account") or {}).get("uuid")
                 try:
-                    info["usage"] = f_usage.result()
-                    usage_cache_put(o, info["usage"], "api")
+                    if fresh:                    # arka arkaya clsw list: az önceki sonuç, API'yi yormadan
+                        info["usage"] = cached["usage"]
+                    else:
+                        info["usage"] = f_usage.result()
+                        usage_cache_put(usage_key(info), info["usage"], "api")
                 except urllib.error.HTTPError as e:
                     if e.code != 429 or not usage_fallback(info):
                         raise
@@ -2382,6 +2398,28 @@ def app_root():
     return os.path.join(HOME, ".local", "share", "clsw")
 
 
+def path_dirs():
+    """PATH'teki klasörlerin gerçek yolları. Açılamayan girdi atlanır (Windows bazı bağlama noktalarında
+    realpath'e "güvenilmeyen bağlama noktası" hatası verir)."""
+    out = set()
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        if not p:
+            continue
+        try:
+            out.add(os.path.normcase(os.path.realpath(p)))
+        except OSError:
+            out.add(os.path.normcase(os.path.abspath(p)))
+    return out
+
+
+def on_path(folder):
+    try:
+        real = os.path.realpath(folder)
+    except OSError:
+        real = os.path.abspath(folder)
+    return os.path.normcase(real) in path_dirs()
+
+
 def bin_dir():
     return os.path.join(HOME, ".local", "bin")
 
@@ -2672,8 +2710,7 @@ def cmd_install():
     where = link_commands()
     cleanup_versions()
     print(green(f"clsw v{__version__} kuruldu: {tilde(exe)}") + dim("  (eş: claudeswap)"))
-    paths = [os.path.normcase(os.path.realpath(p)) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-    if os.path.normcase(os.path.realpath(where)) not in paths and not os.environ.get("CLSW_QUIET_PATH"):
+    if not on_path(where) and not os.environ.get("CLSW_QUIET_PATH"):
         print(yellow(f"{tilde(where)} PATH'te değil; ekle ki her yerden clsw yazılabilsin."))
 
 
@@ -2768,8 +2805,7 @@ def cmd_generate(args):
         print(f"  {bold(f'claude{n}')}  {dim(tilde(os.path.join(HOME, f'.claude{n}')))}")
     print(f"\nGiriş için: {bold(f'claude{made[0]}')} yaz, açılınca {bold('/login')} ile hesabına gir.")
     print(dim("Sonra hesapları görmek için: clsw list · birini claude'a getirmek için: clsw claude" + str(made[0])))
-    paths = [os.path.normcase(os.path.realpath(x)) for x in os.environ.get("PATH", "").split(os.pathsep) if x]
-    if os.path.normcase(os.path.realpath(bdir)) not in paths:
+    if not on_path(bdir):
         print(yellow(f"{tilde(bdir)} PATH'te değil; claudeN komutları için PATH'e ekle."))
     elif os.name != "nt":
         print(dim("Komut bulunamazsa yeni terminal aç (ya da: hash -r)."))
