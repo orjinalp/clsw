@@ -245,6 +245,40 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(ids, {'S1'})
         self.assertIsNone(child.poll(), 'kontrol edilen süreç kapanmış')
 
+    def test_prompt_comes_after_command_output(self):
+        out = Tty()
+        self.g['dispatch'] = lambda argv: print('TABLO') or []
+        self.g['activate'] = lambda changed: None
+        with mock.patch('sys.stdin', Tty('h\n')), mock.patch('sys.stdout', out):
+            os.environ.pop('CLSW_NO_UPDATE', None)
+            self.g['main'](['clsw', 'list'])
+        text = out.getvalue()
+        self.assertLess(text.index('TABLO'), text.index('v1.0.0  →  v1.1.0'))
+        self.assertEqual(self.installed, [])
+
+    def test_slow_network_skips_prompt(self):
+        import threading
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.g['latest_release'] = lambda timeout=5: (gate.wait(5), (self.rel, None))[1]
+        out = Tty()
+        with mock.patch('sys.stdin', Tty('e\n')), mock.patch('sys.stdout', out):
+            os.environ.pop('CLSW_NO_UPDATE', None)
+            self.g['finish_update_check'](self.g['start_update_check'](), wait=0.05)
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(self.installed, [])
+
+    def test_npm_update_only_code_for_new_launcher(self):
+        g = runpy.run_path(str(SCRIPT))['main'].__globals__
+        with mock.patch.dict(os.environ, {'CLSW_LAUNCHER_UPDATE': '1', 'CLSW_LAUNCHER': '2'}), \
+                self.assertRaises(SystemExit) as cm:
+            g['managed_update']('npm', None)
+        self.assertEqual(cm.exception.code, g['LAUNCHER_UPDATE_ONLY_EXIT'])
+        with mock.patch.dict(os.environ, {'CLSW_LAUNCHER_UPDATE': '1'}), self.assertRaises(SystemExit) as cm:
+            os.environ.pop('CLSW_LAUNCHER', None)
+            g['managed_update']('npm', None)                                  # eski başlatıcı: eski kod
+        self.assertEqual(cm.exception.code, g['LAUNCHER_UPDATE_EXIT'])
+
     def test_version_and_update_commands_skip_account_lookup(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

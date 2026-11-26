@@ -669,15 +669,19 @@ def fetch_live(info):
         info["stale"] = True
     else:
         try:
-            prof = api_get(o["accessToken"], "profile")
-            info["token_email"] = (prof.get("account") or {}).get("email")
-            info["token_uuid"] = (prof.get("account") or {}).get("uuid")
-            try:
-                info["usage"] = api_get(o["accessToken"], USAGE_PATH)
-                usage_cache_put(o, info["usage"], "api")
-            except urllib.error.HTTPError as e:
-                if e.code != 429 or not usage_fallback(info):
-                    raise
+            # İki istek aynı anda: her biri ~1 sn (çoğu TLS el sıkışması); arka arkaya hesap başına 2 sn ederdi.
+            with ThreadPoolExecutor(2) as ex:
+                f_prof = ex.submit(api_get, o["accessToken"], "profile")
+                f_usage = ex.submit(api_get, o["accessToken"], USAGE_PATH)
+                prof = f_prof.result()
+                info["token_email"] = (prof.get("account") or {}).get("email")
+                info["token_uuid"] = (prof.get("account") or {}).get("uuid")
+                try:
+                    info["usage"] = f_usage.result()
+                    usage_cache_put(o, info["usage"], "api")
+                except urllib.error.HTTPError as e:
+                    if e.code != 429 or not usage_fallback(info):
+                        raise
         except urllib.error.HTTPError as e:
             info["status"] = "token geçersiz" if e.code in (401, 403) else f"API hatası ({e.code})"
         except Exception:  # ağ hatası vb.
@@ -2290,6 +2294,7 @@ def asset_name():
 
 MANAGED_UPDATE = {"npm": "npm install -g @orjinalp/clsw@latest", "brew": "brew upgrade clsw"}
 LAUNCHER_UPDATE_EXIT = 75            # npm başlatıcısına "beni güncelle, sonra komutu yeniden çalıştır" (EX_TEMPFAIL)
+LAUNCHER_UPDATE_ONLY_EXIT = 76       # "beni güncelle, komut zaten çalıştı" (CLSW_LAUNCHER=2 olan başlatıcı anlar)
 
 
 def install_method():
@@ -2549,12 +2554,14 @@ def do_install(rel):
 
 
 def managed_update(via, argv):
-    """npm/Homebrew kurulumunu kendi komutuyla günceller, sonra komutu yeni sürümle çalıştırır.
+    """npm/Homebrew kurulumunu kendi komutuyla günceller. argv verilirse komutu yeni sürümle yeniden çalıştırır;
+    None ise (komut zaten çalıştı) yalnız günceller.
     npm: güncellemeyi başlatıcı yapar (Windows'ta çalışan .exe kilitli, npm üzerine yazamaz)."""
     if via == "npm":
         if os.environ.get("CLSW_LAUNCHER_UPDATE") == "1":
             sys.stdout.flush()
-            sys.exit(LAUNCHER_UPDATE_EXIT)
+            only = argv is None and os.environ.get("CLSW_LAUNCHER") == "2"
+            sys.exit(LAUNCHER_UPDATE_ONLY_EXIT if only else LAUNCHER_UPDATE_EXIT)
         die(f"Bu kurulum kendi kendine güncellenemiyor; çalıştır: {MANAGED_UPDATE['npm']}")
     brew = shutil.which("brew")
     if not brew:
@@ -2566,6 +2573,9 @@ def managed_update(via, argv):
     exe = os.path.realpath(sys.executable).replace("\\", "/")
     cut = exe.lower().find("/cellar/")
     target = os.path.join(exe[:cut], "bin", "clsw") if cut > 0 else shutil.which("clsw")
+    if argv is None:
+        print(green("Güncellendi; yeni sürüm bir sonraki komutta çalışır."))
+        return
     if target and os.access(target, os.X_OK):
         print()
         rerun(target, argv)
@@ -2579,16 +2589,34 @@ def rerun(target, argv):
     os.execv(target, args)
 
 
-def maybe_offer_update(argv):
-    """Etkileşimli açılışta GitHub'da yeni sürüm varsa sorar; evet → kurar, komutu yeni sürümle çalıştırır."""
+def start_update_check():
+    """Etkileşimli açılışta son sürüm sorgusunu arka planda başlatır (komutu bekletmez); gerekmiyorsa None."""
     if not FROZEN or os.environ.get("CLSW_NO_UPDATE") or os.environ.get("CLSW_AFTER_UPDATE") \
             or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return
+        return None
     st = _update_state()
     now = time.time()
     if now - st.get("checked", 0) < CHECK_EVERY:
+        return None
+    box = {}
+
+    def work():
+        box["rel"], box["err"] = latest_release(timeout=3)
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    return t, box, st, now
+
+
+def finish_update_check(handle, wait=1.5):
+    """Komut bittikten sonra: yeni sürüm varsa çerçevede gösterip sorar; evet → kurar (komut yeniden çalışmaz).
+    Sorgu wait sn içinde bitmediyse (yavaş ağ) bu sefer sormaz."""
+    if not handle:
         return
-    rel, _err = latest_release(timeout=3)
+    t, box, st, now = handle
+    t.join(wait)
+    if t.is_alive():
+        return
+    rel = box.get("rel")
     st["checked"] = now
     if rel:
         st["latest"] = fmt_version(rel["version"])
@@ -2598,6 +2626,7 @@ def maybe_offer_update(argv):
     tag = fmt_version(rel["version"])
     if now - (st.get("snoozed") or {}).get(tag, 0) < SNOOZE:
         return
+    print()
     show_release(rel)
     via = install_method()
     if via:
@@ -2608,11 +2637,19 @@ def maybe_offer_update(argv):
         answer = "h"
     if answer in ("", "e", "evet", "y", "yes"):
         if via:
-            managed_update(via, argv)
-        rerun(do_install(rel), argv)
+            managed_update(via, None)
+        else:
+            do_install(rel)
+            print(dim("Yeni sürüm bir sonraki komutta çalışır."))
+        return
     st["snoozed"] = {tag: now}
     _save_update_state(st)
-    print(dim("Atlandı; bu sürümü 24 saat sormayacağım. İstediğinde: clsw update") + "\n")
+    print(dim("Atlandı; bu sürümü 24 saat sormayacağım. İstediğinde: clsw update"))
+
+
+def maybe_offer_update(argv=None):
+    """Sorguyu başlatıp sonucunu bekler (eş zamanlı kullanım ve testler için)."""
+    finish_update_check(start_update_check(), wait=5)
 
 
 def cmd_version():
@@ -2766,10 +2803,11 @@ def main(argv):
         return cmd_web()
     if cmd == "install":
         return cmd_install()
-    maybe_offer_update(argv)
+    update = start_update_check()             # GitHub sorgusu komutla aynı anda; soru komuttan sonra
     # Maliyet tablosu yalnız okur ve sürebilir (ilk taramada birkaç sn): hesap değişimini bekletmesin diye kilitsiz.
     if cmd in COST_CMDS:
         cmd_cost(argv[2:])
+        finish_update_check(update)
         return
     # Seçim dahil tüm işlemi sıraya al; süreç ölürse kilit otomatik bırakılır.
     os.makedirs(STATE_ROOT, mode=0o700, exist_ok=True)
@@ -2787,6 +2825,7 @@ def main(argv):
         changed = dispatch(argv)
     # Kilit bırakıldıktan sonra: claude -p sürerken başka bir claudeswap beklemesin.
     activate(changed)
+    finish_update_check(update)
 
 
 if __name__ == "__main__":

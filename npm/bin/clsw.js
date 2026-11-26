@@ -8,7 +8,8 @@ const fs = require("fs");
 const path = require("path");
 const { install, binaryPath } = require("../install.js");
 
-const UPDATE_EXIT = 75;
+const UPDATE_EXIT = 75;        // güncelle, sonra komutu yeniden çalıştır
+const UPDATE_ONLY_EXIT = 76;   // güncelle; komut zaten çalıştı
 const PACKAGE = "@orjinalp/clsw";
 
 function run(bin, args, env) {
@@ -55,7 +56,7 @@ async function main() {
     }
   }
   const args = process.argv.slice(2);
-  const env = Object.assign({}, process.env, { CLSW_INSTALLER: "npm", CLSW_LAUNCHER_UPDATE: "1" });
+  const env = Object.assign({}, process.env, { CLSW_INSTALLER: "npm", CLSW_LAUNCHER_UPDATE: "1", CLSW_LAUNCHER: "2" });
   const r = await run(bin, args, env);
   if (r.error) {
     console.error(`clsw: çalıştırılamadı: ${r.error.message}`);
@@ -64,6 +65,14 @@ async function main() {
   if (r.signal) {
     process.kill(process.pid, r.signal);
     return;
+  }
+  if (r.code === UPDATE_ONLY_EXIT) {
+    if (!npmUpdate()) {
+      console.error(`clsw: güncelleme başarısız oldu; elle: npm install -g ${PACKAGE}@latest`);
+      process.exit(1);
+    }
+    console.log("Güncellendi; yeni sürüm bir sonraki komutta çalışır.");
+    process.exit(0);
   }
   if (r.code === UPDATE_EXIT && !process.env.CLSW_AFTER_UPDATE) {
     if (!npmUpdate()) {
