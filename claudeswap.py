@@ -2617,10 +2617,28 @@ def star_box(lines):
     return "\n".join([edge] + body + [edge])
 
 
+NOTE_PLATFORM = re.compile(r"^(-\s*)?\[(windows|macos|linux)\]\s*", re.I)
+
+
+def release_notes(text, platform=None):
+    """Not satırları; "- [windows] …" gibi etiketli satır yalnız o platformda (etiketsiz) gösterilir."""
+    platform = platform or ("windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux")
+    out = []
+    for line in (x.strip() for x in text.splitlines()):
+        m = NOTE_PLATFORM.match(line)
+        if m:
+            if m.group(2).lower() != platform:
+                continue
+            line = (m.group(1) or "") + line[m.end():]
+        if line:
+            out.append(line)
+    return out
+
+
 def show_release(rel):
     lines = [bold("clsw güncellemesi var"), "",
              f"v{__version__}  →  " + bold(green(fmt_version(rel['version'])))]
-    notes = [n.strip() for n in rel["notes"].splitlines() if n.strip()][:12]
+    notes = release_notes(rel["notes"])[:12]
     if notes:
         lines += [""] + notes
     print(star_box(lines))

@@ -44,6 +44,13 @@ class UpdateTests(unittest.TestCase):
                 pass
         return out.getvalue()
 
+    def test_release_notes_by_platform(self):
+        notes = '- herkes için\n- [windows] PATH kalıcı\n- [macOS] Anahtar Zinciri\n\n- [linux] systemd'
+        rn = self.g['release_notes']
+        self.assertEqual(rn(notes, 'windows'), ['- herkes için', '- PATH kalıcı'])
+        self.assertEqual(rn(notes, 'macos'), ['- herkes için', '- Anahtar Zinciri'])
+        self.assertEqual(rn(notes, 'linux'), ['- herkes için', '- systemd'])
+
     def test_parse_version(self):
         pv = self.g['parse_version']
         self.assertEqual(pv('v1.2.3'), (1, 2, 3))

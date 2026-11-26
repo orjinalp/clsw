@@ -1,5 +1,6 @@
 """Yeni sürüm çıkarır: python release.py 1.0.1 "değişiklik 1" "değişiklik 2"
 
+Not başına [windows], [macos] ya da [linux] yazılırsa o satır güncelleme kutusunda yalnız o platformda görünür.
 Sırayla: çalışma ağacı temiz ve main'de mi, testler, __version__ yazılır, commit, notlu etiket, push.
 Programları GitHub Actions derler ve Release'i o açar (.github/workflows/release.yml).
 """
