@@ -2,6 +2,7 @@ name: release
 
 # release.py bir vX.Y.Z etiketi push'layınca: testler, platform başına tek dosya program, GitHub Release
 # (+ SHA256SUMS), sonra npm paketi (@orjinalp/clsw) ve Homebrew formülü (orjinalp/homebrew-tap).
+# Action'lar commit SHA'sına sabit (etiket sonradan değiştirilse de aynı kod çalışır).
 # Gizli değerler: HOMEBREW_TAP_KEY (tap reposuna yazan deploy anahtarı); NPM_TOKEN yalnız npm'de Trusted
 # Publishing kurulmamışsa gerekir.
 on:
@@ -27,10 +28,10 @@ jobs:
             asset: clsw-linux-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Etiket ile __version__ aynı mı
@@ -56,7 +57,7 @@ jobs:
           PY
           mkdir smoke && cd smoke && python -c "import shutil; shutil.unpack_archive('../dist/${{ matrix.asset }}', '.')"
           ./clsw/clsw$ext version
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -67,11 +68,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
       - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           path: dist
           merge-multiple: true
@@ -83,7 +84,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: SHA256SUMS
           path: dist/SHA256SUMS
@@ -95,11 +96,11 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           name: SHA256SUMS
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -125,11 +126,11 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           name: SHA256SUMS
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: orjinalp/homebrew-tap
           ssh-key: ${{ secrets.HOMEBREW_TAP_KEY }}

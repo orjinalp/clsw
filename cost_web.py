@@ -233,6 +233,10 @@ def main():
     srv.daemon_threads = True
     shown = "127.0.0.1" if HOST in ("0.0.0.0", "::") else HOST
     sys.stderr.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} clsw web: http://{shown}:{PORT}\n")
+    if HOST not in ("127.0.0.1", "localhost", "::1"):
+        sys.stderr.write("UYARI: clsw web bu makinenin dışına açık (CLSW_WEB_HOST={}). Bağlantı şifresiz ve giriş "
+                         "yok; yalnız güvenilir bir VPN içinde kullan. İzinli ağlar: {}\n".format(
+                             HOST, ", ".join(str(n) for n in ALLOWED)))
     sys.stderr.flush()
     srv.serve_forever()
 
