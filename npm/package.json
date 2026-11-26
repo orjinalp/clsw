@@ -1,0 +1,35 @@
+{
+  "name": "@orjinalp/clsw",
+  "version": "0.0.0",
+  "description": "Claude Code profilleri arasında hesap değiştirme; limit, oturum ve maliyet görüntüleme.",
+  "homepage": "https://github.com/orjinalp/clsw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orjinalp/clsw.git"
+  },
+  "bin": {
+    "clsw": "bin/clsw.js",
+    "claudeswap": "bin/clsw.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/clsw.js",
+    "install.js",
+    "checksums.json"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cli"
+  ]
+}

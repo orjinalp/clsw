@@ -1,0 +1,146 @@
+name: release
+
+# release.py bir vX.Y.Z etiketi push'layınca: testler, platform başına tek dosya program, GitHub Release
+# (+ SHA256SUMS), sonra npm paketi (@orjinalp/clsw) ve Homebrew formülü (orjinalp/homebrew-tap).
+# Gizli değerler: HOMEBREW_TAP_KEY (tap reposuna yazan deploy anahtarı); NPM_TOKEN yalnız npm'de Trusted
+# Publishing kurulmamışsa gerekir.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read                     # yazma yetkisi yalnız Release'i açan işte
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            asset: clsw-windows-x64.zip
+          - os: macos-latest
+            asset: clsw-macos-arm64.tar.gz
+          - os: ubuntu-22.04
+            asset: clsw-linux-x64.tar.gz
+          - os: ubuntu-22.04-arm
+            asset: clsw-linux-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Etiket ile __version__ aynı mı
+        shell: bash
+        run: |
+          v=$(python -c "import re;print(re.search(r'^__version__ = \"(.+)\"', open('claudeswap.py',encoding='utf-8').read(), re.M).group(1))")
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "etiket $GITHUB_REF_NAME, kod v$v"; exit 1; }
+      - name: Testler
+        run: python -m unittest discover -s tests -v
+      - name: Derle
+        shell: bash
+        # onedir: tek dosya her açılışta kendini açar ve macOS her seferinde tarar (~5 sn); klasör bir kez taranır.
+        run: |
+          pip install pyinstaller==6.22.3
+          pyinstaller --onedir --noconfirm --name clsw --hidden-import cost_web --add-data "cost_web.html:." claudeswap.py
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          dist/clsw/clsw$ext version
+          python - <<'PY'
+          import shutil, sys
+          name = "${{ matrix.asset }}"
+          fmt, base = ("zip", name[:-4]) if name.endswith(".zip") else ("gztar", name[:-7])
+          shutil.make_archive("dist/" + base, fmt, "dist", "clsw")
+          PY
+          mkdir smoke && cd smoke && python -c "import shutil; shutil.unpack_archive('../dist/${{ matrix.asset }}', '.')"
+          ./clsw/clsw$ext version
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+      - uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS ve kurulum betikleri
+        run: |
+          cd dist && sha256sum clsw-* > SHA256SUMS && cat SHA256SUMS
+          cp ../site/install.sh ../site/install.ps1 ../site/install.cmd .
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
+      - uses: actions/upload-artifact@v5
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+
+  npm:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          name: SHA256SUMS
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Yayın yetkisi: npmjs'te bu repo ve iş akışı "Trusted Publisher" olarak tanımlıysa token gerekmez (OIDC;
+      # npm 11.5.1+). Tanımlı değilse NPM_TOKEN gizli değeri kullanılır.
+      - run: npm install -g npm@^11.5.1
+      - name: Paketi hazırla ve yayınla
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+          node -e '
+            const fs = require("fs"); const sums = {};
+            for (const l of fs.readFileSync("../SHA256SUMS", "utf8").split("\n")) {
+              const [h, n] = l.trim().split(/\s+/); if (h && n) sums[n.replace(/^\*/, "")] = h;
+            }
+            fs.writeFileSync("checksums.json", JSON.stringify(sums, null, 2) + "\n");'
+          cat checksums.json
+          npm publish --access public --provenance
+
+  brew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          name: SHA256SUMS
+      - uses: actions/checkout@v5
+        with:
+          repository: orjinalp/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_KEY }}
+          path: tap
+      - name: Formülü güncelle
+        run: |
+          mkdir -p tap/Formula
+          python3 packaging/brew_formula.py "$GITHUB_REF_NAME" SHA256SUMS > tap/Formula/clsw.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/clsw.rb
+          git diff --cached --quiet || git commit -m "clsw $GITHUB_REF_NAME"
+          git push

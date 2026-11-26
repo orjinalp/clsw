@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.claudeswap/
+npm/vendor/
+npm/checksums.json
+npm/node_modules/
+npm/vendor.tmp/
+.DS_Store
