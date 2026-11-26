@@ -6,17 +6,33 @@ Kurulum için Python ya da başka bir şey gerekmez.
 
 ## Kurulum
 
+### macOS (Apple Silicon) ve Linux
+
 ```sh
-# macOS (Apple Silicon) / Linux
 curl -fsSL https://github.com/orjinalp/clsw/releases/latest/download/install.sh | bash
+```
 
-# Windows (PowerShell)
+### Windows (PowerShell)
+
+```powershell
 irm https://github.com/orjinalp/clsw/releases/latest/download/install.ps1 | iex
+```
 
-# npm
+### Windows (Komut İstemi)
+
+```bat
+curl -fsSL https://github.com/orjinalp/clsw/releases/latest/download/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+### npm
+
+```sh
 npm install -g @orjinalp/clsw
+```
 
-# Homebrew
+### Homebrew
+
+```sh
 brew install orjinalp/tap/clsw
 ```
 
