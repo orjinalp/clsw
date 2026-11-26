@@ -227,9 +227,14 @@ class Handler(BaseHTTPRequestHandler):
             super().log_request(code, size)
 
 
-def main():
+def main(ready=None):
     load_claudeswap()
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    try:
+        srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        sys.stderr.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} clsw web açılamadı: {HOST}:{PORT} — "
+                         f"{e.strerror or e} (port başka bir süreçte olabilir)\n")
+        sys.exit(1)
     srv.daemon_threads = True
     shown = "127.0.0.1" if HOST in ("0.0.0.0", "::") else HOST
     sys.stderr.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} clsw web: http://{shown}:{PORT}\n")
@@ -238,6 +243,8 @@ def main():
                          "yok; yalnız güvenilir bir VPN içinde kullan. İzinli ağlar: {}\n".format(
                              HOST, ", ".join(str(n) for n in ALLOWED)))
     sys.stderr.flush()
+    if ready:
+        ready()
     srv.serve_forever()
 
 

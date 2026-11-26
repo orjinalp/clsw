@@ -2429,7 +2429,7 @@ def on_path(folder):
 def add_user_path(folder):
     """Windows: klasörü kullanıcı ortam değişkeni Path'e kalıcı ekler. "added", "present" ya da hata metni."""
     import winreg
-    norm = lambda p: os.path.normcase(os.path.expandvars(p).rstrip("\/"))
+    norm = lambda p: os.path.normcase(os.path.expandvars(p).rstrip("\\/"))
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
                             winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
@@ -2996,20 +2996,23 @@ def web_spawn():
         env.pop(k, None)
     env.update(st.get("env") or {})
     kw = dict(stdin=subprocess.DEVNULL, cwd=HOME, env=env, close_fds=True)
+    cmd = web_command() + ["web", "run"]
     with open(web_file("web.log"), "ab") as log:
         kw.update(stdout=log, stderr=log)
         if os.name == "nt":
             flags = 0x00000008 | 0x00000200            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
             try:
-                subprocess.Popen(web_command() + ["web", "run"], creationflags=flags | 0x01000000, **kw)
+                proc = subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kw)
             except OSError:                             # iş nesnesi ayrılmaya izin vermiyorsa
-                subprocess.Popen(web_command() + ["web", "run"], creationflags=flags, **kw)
+                proc = subprocess.Popen(cmd, creationflags=flags, **kw)
         else:
-            subprocess.Popen(web_command() + ["web", "run"], start_new_session=True, **kw)
+            proc = subprocess.Popen(cmd, start_new_session=True, **kw)
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
         if web_pid_is_ours(web_state().get("pid")):
             return True
+        if proc.poll() is not None:                     # port dolu vb.: hemen çıktı
+            return False
         time.sleep(0.2)
     return False
 
@@ -3104,6 +3107,11 @@ def web_ensure():
         pass
 
 
+def web_log_tail():
+    lines = (read_bytes(web_file("web.log")) or b"").decode("utf-8", "replace").strip().splitlines()
+    return lines[-1] if lines else ""
+
+
 def cmd_web_on():
     env = {k: os.environ[k] for k in WEB_ENV if os.environ.get(k)}
     st = web_state()
@@ -3117,7 +3125,8 @@ def cmd_web_on():
     if running:
         print(green(f"✓ clsw web açık: {web_url(env)}"))
     else:
-        print(red(f"clsw web başlatılamadı; kayıt: {tilde(web_file('web.log'))}"))
+        print(red("clsw web başlatılamadı.") + " " + web_log_tail())
+        print(dim(f"Kayıt: {tilde(web_file('web.log'))}"))
     if err:
         print(yellow(f"Açılışta otomatik başlatma kurulamadı ({err}); her clsw komutunda yine başlatılır."))
     else:
@@ -3164,11 +3173,13 @@ def cmd_web_run(auto=False):
     import cost_web
     cost_web.attach(globals())
     me = os.getpid()
-    st = web_state()
-    st.update(pid=me, version=__version__)
-    save_web_state(st)
+
+    def ready():                          # pid port açıldıktan sonra yazılır: açılamazsa "çalışıyor" görünmesin
+        st = web_state()
+        st.update(pid=me, version=__version__)
+        save_web_state(st)
     try:
-        cost_web.main()
+        cost_web.main(ready)
     finally:
         st = web_state()
         if st.get("pid") == me:
