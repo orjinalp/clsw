@@ -24,7 +24,7 @@ except ImportError:          # Windows
     fcntl = None
     import msvcrt
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 HOME = os.path.expanduser("~")
 
