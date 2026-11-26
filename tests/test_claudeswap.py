@@ -881,19 +881,46 @@ class WebHostTests(unittest.TestCase):
             self.assertEqual(h.host_ok(), ok, host)
 
 
-class TokenCellTests(unittest.TestCase):
-    def test_token_and_login_expiry_cells(self):
-        g = runpy.run_path(str(SCRIPT))['main'].__globals__
-        g['USE_COLOR'] = False
-        now = 1_000_000.0
-        tc = lambda o: g['token_cells'](o, now)
-        o = {'accessToken': 'a', 'expiresAt': (now + 7 * 3600 + 600) * 1000,
-             'refreshToken': 'r', 'refreshTokenExpiresAt': (now + 25 * 86400 + 3600) * 1000}
-        self.assertEqual(tc(o), ('7sa 10dk', '25g 1sa'))
-        self.assertEqual(tc(dict(o, expiresAt=(now - 5) * 1000, refreshTokenExpiresAt=(now - 1) * 1000)),
-                         ('dolmuş', 'dolmuş'))
-        self.assertEqual(tc({}), ('-', '-'))                                  # giriş yok
-        self.assertEqual(tc({'accessToken': 'a', 'expiresAt': (now + 60) * 1000, 'refreshToken': 'r'})[1], '?')
+class ListCellTests(unittest.TestCase):
+    def setUp(self):
+        self.g = runpy.run_path(str(SCRIPT))['main'].__globals__
+        self.g['USE_COLOR'] = False
+
+    def test_expires_at_cell(self):
+        g, now = self.g, 1_000_000.0
+        cell = lambda o: g['expires_cell'](o, now)
+        t = now + 25 * 86400
+        self.assertEqual(cell({'refreshToken': 'r', 'refreshTokenExpiresAt': t * 1000}), g['clock'](t))
+        self.assertTrue(cell({'refreshToken': 'r', 'refreshTokenExpiresAt': (now - 60) * 1000}).endswith('(dolmuş)'))
+        self.assertEqual(cell({}), '-')                                       # giriş yok
+        self.assertEqual(cell({'refreshToken': 'r'}), '?')
+
+    def test_system_certs_used_only_when_own_path_missing(self):
+        from unittest import mock
+        import ssl, os
+        g = self.g
+        fake = ssl.DefaultVerifyPaths('/yok/cert.pem', '/yok/certs', 'SSL_CERT_FILE', '/yok/cert.pem',
+                                      'SSL_CERT_DIR', '/yok/certs')
+        env = {}
+        with mock.patch('ssl.get_default_verify_paths', return_value=fake), \
+                mock.patch('os.path.isfile', side_effect=lambda f: f == '/etc/ssl/certs/ca-certificates.crt'), \
+                mock.patch('os.name', 'posix'):
+            self.assertEqual(g['use_system_certs'](env), '/etc/ssl/certs/ca-certificates.crt')
+        self.assertEqual(env['SSL_CERT_FILE'], '/etc/ssl/certs/ca-certificates.crt')
+        self.assertIsNone(g['use_system_certs']({'SSL_CERT_FILE': '/x'}))     # kullanıcı ayarına dokunulmaz
+
+    def test_update_box(self):
+        g = self.g
+        g['__version__'] = '1.1.0'
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            g['show_release']({'version': (1, 1, 1), 'notes': '- düzeltme\n- yeni sütun'})
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith('*****') and lines[-1] == lines[0])
+        self.assertTrue(all(l.startswith('*') and l.endswith('*') for l in lines))
+        self.assertEqual(len({len(l) for l in lines}), 1)                    # kutu düzgün
+        self.assertIn('v1.1.0  →  v1.1.1', out.getvalue())
+        self.assertIn('- yeni sütun', out.getvalue())
 
 
 if __name__ == '__main__':

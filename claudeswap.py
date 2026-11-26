@@ -26,6 +26,35 @@ except ImportError:          # Windows
 
 __version__ = "1.1.0"
 
+# Derlenmiş programın (PyInstaller) OpenSSL'i sertifika listesini derlendiği makinedeki yolda arar; o yol kullanıcının
+# makinesinde yoksa her HTTPS isteği "sertifika doğrulanamadı" ile düşer. O durumda sistemin listesi gösterilir.
+# Windows'ta Python sistem sertifika deposunu kendisi okur.
+CA_FILES = ("/etc/ssl/cert.pem",                                  # macOS, Alpine, Arch
+            "/etc/ssl/certs/ca-certificates.crt",                 # Debian, Ubuntu
+            "/etc/pki/tls/certs/ca-bundle.crt",                   # Fedora, RHEL
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+            "/etc/ssl/ca-bundle.pem")                             # openSUSE
+
+
+def use_system_certs(env=None):
+    """Kendi sertifika yolu yoksa SSL_CERT_FILE'ı sistemin listesine yönlendirir; seçilen yolu ya da None döner."""
+    import ssl
+    env = os.environ if env is None else env
+    if os.name == "nt" or env.get("SSL_CERT_FILE"):
+        return None
+    paths = ssl.get_default_verify_paths()
+    if (paths.cafile and os.path.isfile(paths.cafile)) or (paths.capath and os.path.isdir(paths.capath)
+                                                            and os.listdir(paths.capath)):
+        return None
+    for f in CA_FILES:
+        if os.path.isfile(f):
+            env["SSL_CERT_FILE"] = f
+            return f
+    return None
+
+
+use_system_certs()
+
 HOME = os.path.expanduser("~")
 
 
@@ -661,24 +690,20 @@ def fmt_delta(sec):
     return f"{m}dk"
 
 
-def token_cells(o, now=None):
-    """(TOKEN, GİRİŞ) hücreleri: erişim token'ının (≈8 sa, clsw list ve Claude Code yeniler) ve girişin
-    (yenileme token'ı; bitince /login gerekir) dolmasına kalan süre."""
+def expires_cell(o, now=None):
+    """EXPIRES AT: girişin (yenileme token'ı) bittiği an; sonra o profili açıp /login gerekir.
+    3 günden az kaldıysa sarı, geçtiyse kırmızı."""
     now = time.time() if now is None else now
-
-    def cell(ms, warn):
-        if not isinstance(ms, (int, float)) or isinstance(ms, bool) or ms <= 0:
-            return dim("-")
-        left = ms / 1000 - now
-        if left <= 0:
-            return red("dolmuş")
-        txt = fmt_delta(left)
-        return yellow(txt) if left < warn else txt
-    access = cell(o.get("expiresAt"), 1800) if o.get("accessToken") else dim("-")
-    login = cell(o.get("refreshTokenExpiresAt"), 3 * 86400) if o.get("refreshToken") else dim("-")
-    if o.get("refreshToken") and not o.get("refreshTokenExpiresAt"):
-        login = dim("?")
-    return access, login
+    ms = o.get("refreshTokenExpiresAt")
+    if not o.get("refreshToken"):
+        return dim("-")
+    if not isinstance(ms, (int, float)) or isinstance(ms, bool) or ms <= 0:
+        return dim("?")
+    t = ms / 1000
+    txt = clock(t)
+    if t <= now:
+        return red(txt + " (dolmuş)")
+    return yellow(txt) if t - now < 3 * 86400 else txt
 
 
 def parse_iso(s):
@@ -2068,15 +2093,14 @@ def cmd_list():
         u = i.get("usage") or {}
         rows.append([bold(i["slot"]["name"]), email, plan_label(i["oauth"]),
                      usage_cell(u.get("five_hour")), usage_cell(u.get("seven_day")),
-                     resets_cell(u), *token_cells(i["oauth"]), status])
+                     resets_cell(u), expires_cell(i["oauth"]), status])
 
     print(bold("Hesaplar"))
-    print_table(["KOMUT", "HESAP", "PLAN", "5 SAAT", "7 GÜN", "RESET", "TOKEN", "GİRİŞ", "DURUM"], rows)
+    print_table(["KOMUT", "HESAP", "PLAN", "5 SAAT", "7 GÜN", "RESET", "EXPIRES AT", "DURUM"], rows)
     print(dim("  5 SAAT / 7 GÜN: % kullanım + sıfırlanmasına kalan süre"))
     print(dim("  RESET = kalan limit sıfırlama hakkı + son kullanma tarihi · yeşil: şimdi kullanılabilir"
               " · kullanmak için o profili açıp /limit-reset"))
-    print(dim("  TOKEN = erişim token'ının dolmasına kalan (≈8 sa; kendiliğinden yenilenir) · "
-              "GİRİŞ = girişin bitmesine kalan (bitince o profili açıp /login)"))
+    print(dim("  EXPIRES AT = girişin bittiği an; sonra o profili açıp /login"))
     statuses = {i.get("status") for i in infos}
     if statuses & set(NEEDS_LOGIN):
         print(dim("  " + " / ".join(x for x in NEEDS_LOGIN if x in statuses) + " = o profili açıp /login"))
@@ -2473,10 +2497,21 @@ def _save_update_state(st):
         pass
 
 
+def star_box(lines):
+    """Satırları yıldız çerçeve içinde alt alta basılacak metne çevirir (renk kodları genişliğe sayılmaz)."""
+    width = max(vlen(x) for x in lines) + 4
+    edge = yellow("*" * (width + 2))
+    body = [yellow("*") + "  " + x + " " * (width - 2 - vlen(x)) + yellow("*") for x in lines]
+    return "\n".join([edge] + body + [edge])
+
+
 def show_release(rel):
-    print(bold(f"Yeni clsw sürümü: {fmt_version(rel['version'])}") + dim(f"  (kurulu: v{__version__})"))
-    for line in rel["notes"].splitlines()[:15]:
-        print("  " + line)
+    lines = [bold("clsw güncellemesi var"), "",
+             f"v{__version__}  →  " + bold(green(fmt_version(rel['version'])))]
+    notes = [n.strip() for n in rel["notes"].splitlines() if n.strip()][:12]
+    if notes:
+        lines += [""] + notes
+    print(star_box(lines))
 
 
 def do_install(rel):

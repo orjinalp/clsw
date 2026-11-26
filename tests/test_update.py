@@ -63,7 +63,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_yes_installs_and_reruns(self):
         out = self.offer('e')
-        self.assertIn('Yeni clsw sürümü: v1.1.0', out)
+        self.assertIn('v1.0.0  →  v1.1.0', out)
         self.assertIn('yeni özellik', out)
         self.assertEqual(self.installed, [(1, 1, 0)])
 
