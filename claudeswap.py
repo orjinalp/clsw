@@ -157,6 +157,7 @@ Kullanım:
   clsw empty                İlk giriş yapılmamış profili claude ile değiştir
   clsw generate 3           3 yeni profil aç (sıradaki numaralarla: claude7, claude8 …)
   clsw list                 Hesaplar, limitler, reset hakları
+  clsw fix                  "hesap uyuşmuyor" onarımı: .claude.json'u token'ın hesabına göre düzelt
   clsw process              Açık Claude oturumları; eş: ps, oturum
   clsw cost                 İstem / iş başına maliyet (son 24 saat); eş: maliyet
   clsw web on | off         Maliyet web arayüzü (http://127.0.0.1:8790); ayar yeniden açılışta da geçerli
@@ -171,7 +172,8 @@ Hesap değiştirme:
   taşınır; ayarlar, plugin'ler, hafıza, geçmiş ve projeler kendi profilinde kalır.
   Boş profile de taşınabilir: hesap oraya geçer, claude giriş yapılmamış kalır (yeni hesap: /login).
   Her değişimden önce yedek: ~/.claudeswap/backups/<zaman>/ · geri almak: aynı iki profili tekrar değiştir.
-  Açık oturumları yeni hesap için yeniden başlat.
+  O profillerde açık oturum varsa önce sorar (etkileşimsizse durur; geçmek için --force): açık oturum
+  token yenileyince eski hesabın girişini geri yazıp hesapları karıştırabilir.
   5 saatlik penceresi başlamamış hesaba küçük bir istek gönderilip pencere başlatılır
   (kapatmak: CLAUDESWAP_NO_ACTIVATE=1).
 
@@ -2157,6 +2159,8 @@ def cmd_list():
                   " bir sonraki clsw list'te ya da profil açılınca yenilenir"))
     for m in mismatch:
         print(red("  hesap uyuşmuyor — " + m))
+    if mismatch:
+        print(dim("  düzeltmek için: clsw fix"))
     if any(i.get("usage_src") for i in infos):
         print(dim("  ✓ hazır · Ndk = kullanım API'si o hesap için istek sınırında (429); değerler N dk önceki kayıttan"))
     if any(i.get("usage_src") == "olcum" for i in infos):
@@ -2181,12 +2185,37 @@ def _set_or_pop(d, key, value):
         d[key] = value
 
 
+FORCE = False          # --force: açık oturum uyarısını geç
+
+
+def guard_open_sessions(pair):
+    """Açık oturum token'ını yenileyince eski hesabın girişini profile geri yazar; .claude.json yeni hesabı
+    gösterirken token eskisinin olur (clsw list: hesap uyuşmuyor). O yüzden önce sorulur."""
+    names = {s["name"] for s in pair}
+    busy = [s for s in running_sessions() if s["slot"] in names]
+    if not busy or FORCE:
+        return
+    print(yellow(f"⚠  {' ve '.join(s['name'] for s in pair)} profillerinde açık Claude oturumu var:"))
+    print_sessions(busy)
+    print(dim("  Bunlar token yenileyince eski hesabın girişini profile geri yazabilir; hesaplar karışır."))
+    if sys.stdin.isatty():
+        try:
+            answer = input("Yine de değiştireyim mi? [e/H] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer in ("e", "evet", "y", "yes"):
+            return
+        die("Değişim yapılmadı. Oturumları kapatıp tekrar dene.")
+    die("Değişim yapılmadı. Oturumları kapatıp tekrar dene ya da --force ekle.")
+
+
 def cmd_swap(a, b):
     """Değişen profilleri döner (değişiklik yoksa boş liste)."""
     if a == b:
         print(f"✓ {a['name']} zaten seçili; değişiklik yapılmadı.")
         return []
     pair = [a, b]
+    guard_open_sessions(pair)
     for s in pair:
         os.makedirs(s["dir"], mode=0o700, exist_ok=True)
 
@@ -2201,7 +2230,9 @@ def cmd_swap(a, b):
             for kind in ("creds", "json"):
                 validated_object(raw[(slot["name"], kind)], slot[kind])
         if raw[(a["name"], "creds")] is None and raw[(b["name"], "creds")] is None:
-            die("İki tarafta da giriş yok; değiştirilecek hesap bulunamadı.")
+            die(f"{a['name']} ve {b['name']} profillerinin ikisinde de giriş yok; yer değiştirecek hesap yok.\n"
+                f"  Giriş için: `{b['name']}` komutunu açıp /login yap.\n"
+                f"  Girişli bir hesabı buraya almak için: clsw {b['name']} <girişli profil>")
         ea, eb = account_email(ja) or "giriş yok", account_email(jb) or "giriş yok"
 
         backup = make_backup(raw)
@@ -2246,6 +2277,59 @@ def cmd_swap(a, b):
     print()
     print(dim("Limitleri görmek için: claudeswap list"))
     return pair
+
+
+def swap_account_fields(a, b):
+    """Yalnız iki .claude.json'daki hesap alanlarını değiştirir; girişlere (token) dokunmaz."""
+    first, second = sorted([a, b], key=lambda s: s["json"])
+    with Lock(first["json"]), Lock(second["json"]):
+        raw = {(s["name"], "json"): read_bytes(s["json"]) for s in (a, b)}
+        ja, jb = (validated_object(raw[(s["name"], "json")], s["json"]) for s in (a, b))
+        backup = make_backup(raw)
+        for k in ACCOUNT_KEYS:
+            va, vb = ja.get(k, MISSING), jb.get(k, MISSING)
+            _set_or_pop(ja, k, vb)
+            _set_or_pop(jb, k, va)
+        try:
+            atomic_write(a["json"], json.dumps(ja, indent=2, ensure_ascii=False).encode())
+            atomic_write(b["json"], json.dumps(jb, indent=2, ensure_ascii=False).encode())
+        except BaseException as e:
+            for s in (a, b):
+                if raw[(s["name"], "json")] is not None:
+                    atomic_write(s["json"], raw[(s["name"], "json")])
+            die(f"Düzeltme yarıda kaldı ve geri alındı ({type(e).__name__}). Yedek: {tilde(backup)}")
+    return backup
+
+
+def cmd_fix():
+    """`hesap uyuşmuyor` onarımı: token'ın hesabını .claude.json'unda taşıyan profili bulup hesap alanlarını
+    değiştirir. Öyle bir profil yoksa (bilgi kaybolmuş) /login önerir."""
+    slots = [s for s in SLOTS if os.path.isdir(s["dir"])]
+    with ThreadPoolExecutor(len(slots)) as ex:
+        infos = list(ex.map(lambda s: fetch_live(refresh_if_stale(slot_info(s))), slots))
+    wrong = [i for i in infos if i.get("token_email") and i["email"] != i["token_email"]]
+    if not wrong:
+        print(green("✓ Uyuşmayan hesap yok; değişiklik yapılmadı."))
+        return []
+    done, changed = set(), []
+    for i in wrong:
+        name, te = i["slot"]["name"], i["token_email"]
+        if name in done:
+            continue
+        other = next((o for o in infos if o is not i and o["email"] == te and o["slot"]["name"] not in done), None)
+        if other is None or other.get("token_email") == te:
+            print(yellow(f"⚠  {name}: token {te} hesabının, ama {te} bilgisini taşıyan başka profil yok."))
+            print(dim(f"  Düzeltmek için `{name}` komutunu açıp /login yap."))
+            continue
+        on = other["slot"]["name"]
+        backup = swap_account_fields(i["slot"], other["slot"])
+        done |= {name, on}
+        changed += [i["slot"], other["slot"]]
+        print(green(f"✓ {name} artık {te} (token'ıyla aynı)") + dim(f" · {on} → {i['email'] or 'boş'}"))
+        print(dim(f"  Yedek: {tilde(backup)}"))
+    if changed:
+        print(dim("  Girişlere dokunulmadı; yalnız .claude.json hesap alanları yer değiştirdi. Kontrol: clsw list"))
+    return []
 
 
 def validated_object(raw, path):
@@ -2802,7 +2886,9 @@ def cmd_update(args):
 
 def dispatch(argv):
     """Komutu çalıştırır; hesabı değişen profilleri döner."""
-    args = argv[1:]
+    global FORCE
+    args = [a for a in argv[1:] if a not in ("--force", "-f")]
+    FORCE = len(args) != len(argv) - 1
     cmd = args[0] if args else "help"
     by_name = {s["name"]: s for s in SLOTS}
     if cmd.lower() in GENERATE_CMDS:
@@ -2820,6 +2906,8 @@ def dispatch(argv):
         cmd_list()
     elif cmd in ("process", "processes", "proc", "oturum", "oturumlar", "ps"):
         cmd_sessions()
+    elif cmd in ("fix", "onar", "düzelt", "duzelt"):
+        return cmd_fix()
     elif cmd in by_name:
         return cmd_swap(SLOTS[0], by_name[cmd])
     elif cmd in ("empty", "bos", "boş"):
