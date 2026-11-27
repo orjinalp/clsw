@@ -24,7 +24,7 @@ except ImportError:          # Windows
     fcntl = None
     import msvcrt
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 # Derlenmiş programın (PyInstaller) OpenSSL'i sertifika listesini derlendiği makinedeki yolda arar; o yol kullanıcının
 # makinesinde yoksa her HTTPS isteği "sertifika doğrulanamadı" ile düşer. O durumda sistemin listesi gösterilir.
