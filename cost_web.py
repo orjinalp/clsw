@@ -4,8 +4,9 @@
 
 Varsayılan olarak yalnız bu makineden erişilir (127.0.0.1). Yalnız okur: oturum kayıtları ve clsw dosyaları.
 Başka makinelerden erişim için: CLSW_WEB_HOST=0.0.0.0, CLSW_WEB_ALLOW=<ağ/maske,…> (ör. 192.0.2.0/24) ve
-tarayıcıda yazılacak adlar CLSW_WEB_NAMES=<ad,…>. İstek Host başlığı bu adlardan biri değilse reddedilir
-(başka bir sitenin DNS rebinding ile 127.0.0.1'deki veriyi okuması engellenir). Bağlantı şifresizdir.
+tarayıcıda IP yerine yazılacak adlar CLSW_WEB_NAMES=<ad,…> (makinenin kendi adı kendiliğinden tanınır).
+Host başlığı IP ya da bu adlardan biri değilse reddedilir (başka bir sitenin DNS rebinding ile
+127.0.0.1'deki veriyi okuması engellenir; rebinding alan adıyla olur, IP ile olmaz). Bağlantı şifresizdir.
 """
 import gzip
 import ipaddress
@@ -13,6 +14,7 @@ import json
 import os
 import re
 import runpy
+import socket
 import sys
 import threading
 import time
@@ -29,6 +31,8 @@ ALLOWED = [ipaddress.ip_network(n.strip(), strict=False)
            for n in ("127.0.0.0/8,::1/128," + os.environ.get("CLSW_WEB_ALLOW", "")).split(",") if n.strip()]
 NAMES = {"127.0.0.1", "localhost", "::1"} | {n.strip().lower() for n in
                                              (os.environ.get("CLSW_WEB_NAMES", "") + "," + HOST).split(",") if n.strip()}
+_me = socket.gethostname().lower()
+NAMES |= {_me, _me.split(".")[0], _me.split(".")[0] + ".local"}
 MAX_SPAN = 31 * 86400                 # tek istekte en geniş aralık (ilk tarama 30 günde ~1 dk sürer)
 MEMO_SEC = 15                         # aynı aralık bu kadar saniye içinde tekrar istenirse yeniden hesaplanmaz
 GROUP = {"p": "p", "terminal": "terminal", "kanal": "kanal", "zamanlayici": "zamanlayici"}   # grafik grupları; kalanlar «diğer»
@@ -159,7 +163,13 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return False
         name, port = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
-        return name in NAMES and (port is None or port == str(PORT))
+        if port is not None and port != str(PORT):
+            return False
+        try:
+            ipaddress.ip_address(name)
+            return True
+        except ValueError:
+            return name in NAMES
 
     def allowed(self):
         if not self.host_ok():
@@ -194,7 +204,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self.allowed():
-            self.send(403, "Bu adresten erişim kapalı (CLSW_WEB_ALLOW).\n".encode(), "text/plain; charset=utf-8")
+            why = ("Bu ad tanınmıyor; IP ile aç ya da adı CLSW_WEB_NAMES'e ekle." if not self.host_ok()
+                   else "Bu adresten erişim kapalı (CLSW_WEB_ALLOW).")
+            self.send(403, (why + "\n").encode(), "text/plain; charset=utf-8")
             return
         url = urlparse(self.path)
         try:

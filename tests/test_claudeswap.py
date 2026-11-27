@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'claudeswap.py'
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # cost_web
@@ -876,9 +877,22 @@ class WebHostTests(unittest.TestCase):
         h = cost_web.Handler.__new__(cost_web.Handler)
         port = cost_web.PORT
         for host, ok in ((f'127.0.0.1:{port}', True), (f'localhost:{port}', True), (f'[::1]:{port}', True),
-                         ('127.0.0.1', True), (f'kotu.example.com:{port}', False), ('127.0.0.1:1', False), ('', False)):
+                         (f'100.80.143.150:{port}', True), ('127.0.0.1', True),
+                         (f'{cost_web._me}:{port}', True), (f'kotu.example.com:{port}', False),
+                         ('127.0.0.1:1', False), ('', False)):
             h.headers = {'Host': host}
             self.assertEqual(h.host_ok(), ok, host)
+
+    def test_allowed_checks_client_network_after_accepting_ip_host(self):
+        import ipaddress
+        import cost_web
+        h = cost_web.Handler.__new__(cost_web.Handler)
+        h.headers = {'Host': f'100.80.143.150:{cost_web.PORT}'}
+        with mock.patch.object(cost_web, 'ALLOWED', [ipaddress.ip_network('100.64.0.0/10')]):
+            h.client_address = ('100.80.238.181', 50000)
+            self.assertTrue(h.allowed())
+            h.client_address = ('192.168.1.2', 50000)
+            self.assertFalse(h.allowed())
 
 
 class ListCellTests(unittest.TestCase):

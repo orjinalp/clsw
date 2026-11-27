@@ -196,7 +196,8 @@ Maliyet (clsw cost):
 Web arayüzü (clsw web):
   Varsayılan kapalı. clsw web on arka planda başlatır ve oturum açılışına ekler (Windows: kullanıcı
   başlangıcı, macOS: LaunchAgent, Linux: systemd --user); clsw web off durdurur ve kaldırır.
-  Kayıt: ~/.claudeswap/web.log. on anındaki CLSW_WEB_HOST/PORT/ALLOW/NAMES saklanır; düz on yerele döner.
+  Kayıt: ~/.claudeswap/web.log. on anındaki CLSW_WEB_HOST/PORT/ALLOW/NAMES saklanır; düz on kayıtlı ayarı
+  korur, yalnız yerele dönmek: clsw web on --local. Tarayıcıda IP ya da makinenin adıyla açılır.
 
 Güncelleme:
   Terminalde açılınca yeni sürüm varsa notlarını gösterip sorar; npm ya da Homebrew ile
@@ -2983,7 +2984,7 @@ WEB_ENV = ("CLSW_WEB_HOST", "CLSW_WEB_PORT", "CLSW_WEB_ALLOW", "CLSW_WEB_NAMES")
 WEB_LABEL = "com.orjinalp.clsw.web"
 WEB_ON = ("on", "aç", "ac", "start")
 WEB_OFF = ("off", "kapat", "stop")
-WEB_USAGE = "Kullanım: clsw web [on|off|status|run]"
+WEB_USAGE = "Kullanım: clsw web [on [--local]|off|status|run]"
 
 
 def web_state():
@@ -3200,9 +3201,12 @@ def web_log_tail():
     return lines[-1] if lines else ""
 
 
-def cmd_web_on():
-    env = {k: os.environ[k] for k in WEB_ENV if os.environ.get(k)}
+def cmd_web_on(local=False):
+    """Ortamda CLSW_WEB_* varsa onlar saklanır; yoksa kayıtlı ayar korunur (--local: yalnız bu makine)."""
     st = web_state()
+    env = {k: os.environ[k] for k in WEB_ENV if os.environ.get(k)}
+    if not env and not local:
+        env = dict(st.get("env") or {})
     changed = st.get("env", {}) != env
     st.update(on=True, env=env)
     save_web_state(st)
@@ -3238,7 +3242,12 @@ def cmd_web_status():
     st = web_state()
     pid = st.get("pid")
     if web_pid_is_ours(pid):
-        print(green(f"clsw web çalışıyor: {web_url(st.get('env') or {})}") + dim(f"  (pid {pid})"))
+        env = st.get("env") or {}
+        print(green(f"clsw web çalışıyor: {web_url(env)}") + dim(f"  (pid {pid})"))
+        if env.get("CLSW_WEB_HOST", "127.0.0.1") not in ("127.0.0.1", "localhost", "::1"):
+            print(dim(f"Dışarıya açık: {env['CLSW_WEB_HOST']} · izinli ağlar: {env.get('CLSW_WEB_ALLOW') or 'yalnız bu makine'}"))
+        else:
+            print(dim("Yalnız bu makineden erişilir."))
     else:
         print("clsw web çalışmıyor.")
     print(dim("Ayar: " + ("açık (açılışta başlar) · kapatmak: clsw web off" if st.get("on")
@@ -3279,7 +3288,7 @@ def cmd_web_run(auto=False):
 def cmd_web(args):
     sub = args[0].lower() if args else "status"
     if sub in WEB_ON:
-        return cmd_web_on()
+        return cmd_web_on(local=any(a in ("--local", "yerel") for a in args[1:]))
     if sub in WEB_OFF:
         return cmd_web_off()
     if sub in ("status", "durum"):

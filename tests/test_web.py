@@ -89,13 +89,16 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(self.spawned), 2)
         self.assertEqual(len(self.killed), 1)
 
-    def test_on_saves_env_and_plain_on_resets_to_local(self):
-        out = self.web('on', env={'CLSW_WEB_HOST': '0.0.0.0', 'CLSW_WEB_PORT': '9000'})
+    def test_on_saves_env_plain_on_keeps_it_local_resets(self):
+        saved = {'CLSW_WEB_HOST': '0.0.0.0', 'CLSW_WEB_PORT': '9000'}
+        out = self.web('on', env=saved)
         self.assertIn('UYARI', out)
-        self.assertEqual(self.spawned[-1], {'CLSW_WEB_HOST': '0.0.0.0', 'CLSW_WEB_PORT': '9000'})
-        self.web('on')
+        self.assertEqual(self.spawned[-1], saved)
+        self.web('off')
+        self.web('on')                                   # düz on kayıtlı ayarı korur
+        self.assertEqual(self.spawned[-1], saved)
+        self.web('on', '--local')
         self.assertEqual(self.spawned[-1], {})
-        self.assertEqual(len(self.killed), 1)
 
     def test_auto_run_does_nothing_when_off(self):
         with mock.patch.dict('sys.modules', {'cost_web': None}):
